@@ -20,21 +20,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"sort"
-	"strings"
-
-	"github.com/google/go-containerregistry/pkg/v1/tarball"
-
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 // Build builds an artifact with Bazel.
@@ -44,9 +41,7 @@ func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Art
 		log.Entry(ctx).Warnf("multiple target platforms %q found for artifact %q. Skaffold doesn't yet support multi-platform builds for the bazel builder. Consider specifying a single target platform explicitly. See https://skaffold.dev/docs/pipeline-stages/builders/#cross-platform-build-support", matcher.String(), artifact.ImageName)
 	}
 
-	a := artifact.ArtifactType.BazelArtifact
-
-	tarPath, err := b.buildTar(ctx, out, artifact.Workspace, a, matcher)
+	tarPath, err := singletonBatchingBuilder.build(ctx, out, artifact, matcher)
 	if err != nil {
 		return "", err
 	}
@@ -72,15 +67,7 @@ func bazelPlatform(matcher platform.Matcher, platformMappings []latest.BazelPlat
 	return ""
 }
 
-func (b *Builder) buildTar(ctx context.Context, out io.Writer, workspace string, a *latest.BazelArtifact, matcher platform.Matcher) (string, error) {
-	artifacts, err := b.buildTars(ctx, out, workspace, []*latest.BazelArtifact{a}, matcher)
-	if err != nil {
-		return "", nil
-	}
-	return artifacts[a], nil
-}
-
-func (b *Builder) buildTars(ctx context.Context, out io.Writer, workspace string, as []*latest.BazelArtifact, matcher platform.Matcher) (map[*latest.BazelArtifact]string, error) {
+func buildTars(ctx context.Context, out io.Writer, workspace string, as []*latest.BazelArtifact, matcher platform.Matcher) (map[*latest.BazelArtifact]string, error) {
 	buildTargets := make([]string, len(as))
 	for i, a := range as {
 		if !strings.HasSuffix(a.BuildTarget, ".tar") {
@@ -89,8 +76,7 @@ func (b *Builder) buildTars(ctx context.Context, out io.Writer, workspace string
 		buildTargets[i] = a.BuildTarget
 	}
 
-	// We trust that all of these artifacts use the same args, because that is part of the batch cache key.
-	// Ditto for platform mapping
+	// TODO validate that they are identical? They always will be today, provided this is only called by the  BatchBuilder.
 	buildArgs := as[0].BuildArgs
 	platformMappings := as[0].PlatformMappings
 	args := []string{"build"}
@@ -189,48 +175,4 @@ func bazelTarPath(ctx context.Context, workspace string, a *latest.BazelArtifact
 	execRoot := strings.TrimSpace(string(buf))
 
 	return filepath.Join(execRoot, targetPath), nil
-}
-
-func (b *Builder) BuildMultiple(ctx context.Context, out io.Writer, as []*latest.Artifact, tags map[*latest.Artifact]string, platforms platform.Matcher) (map[*latest.Artifact]string, error) {
-	// We include Workspace in the batch key, so it will always be the same here for all artifacts.
-	bazelArtifacts := make([]*latest.BazelArtifact, len(as))
-	for i, a := range as {
-		bazelArtifacts[i] = a.BazelArtifact
-	}
-
-	tarPaths, err := b.buildTars(ctx, out, as[0].Workspace, bazelArtifacts, platforms)
-	if err != nil {
-		return nil, err
-	}
-
-	digests := make(map[*latest.Artifact]string, len(as))
-
-	for _, a := range as {
-		var digest string
-		var err error
-		if b.pushImages {
-			digest, err = docker.Push(tarPaths[a.BazelArtifact], tags[a], b.cfg, nil)
-		} else {
-			digest, err = b.loadImage(ctx, out, tarPaths[a.BazelArtifact], tags[a])
-		}
-		if err != nil {
-			return nil, err
-		}
-		digests[a] = digest
-	}
-	return digests, nil
-}
-
-func (*Builder) ComputeBatchKey(ctx context.Context, a *latest.Artifact, platforms platform.Matcher) string {
-	sorted := make([]string, len(a.BazelArtifact.BuildArgs))
-	copy(sorted, a.BazelArtifact.BuildArgs)
-	sort.Strings(sorted)
-
-	// TODO: Implement building multi-platform images
-	if platforms.IsMultiPlatform() {
-		log.Entry(ctx).Warnf("multiple target platforms %q found for artifact %q. Skaffold doesn't yet support multi-platform builds for the bazel builder. Consider specifying a single target platform explicitly. See https://skaffold.dev/docs/pipeline-stages/builders/#cross-platform-build-support", platforms.String(), a.ImageName)
-	}
-	bazelPlatform := bazelPlatform(platforms, a.BazelArtifact.PlatformMappings)
-	return strings.Join(sorted, ",") + "%%" + a.Workspace + "%%" + bazelPlatform
-
 }

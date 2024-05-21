@@ -118,5 +118,5 @@ func (b *MultiArtifactBuild) run(maj multiJarBuilder, batchSize time.Duration) {
 		bazelArtifacts[i] = a.BazelArtifact
 	}
 	b.digest, b.err = maj(b.ctx, b.out, b.workspace, bazelArtifacts, b.platforms)
-	b.doneCond <- true
+	close(b.doneCond)
 }
